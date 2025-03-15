@@ -63,7 +63,7 @@ Return a valid JSON object with the following structure (and no additional text)
       "output": "Corresponding expected output"
     }
   ],
-  "explanation": "A detailed, step-by-step explanation of how to approach and solve the problem, including time and space complexity analysis and alternative approaches if relevant. Explain your reasoning behind the public test cases."
+  "explanation": "A detailed, step-by-step explanation of how to approach and solve the problem, including time and space complexity analysis and alternative approaches if relevant. Explain your reasoning behind the public test cases. Keep explanation concise and under 800 words."
 }
 
 GUIDELINES FOR CREATING PROFESSIONAL CODING CHALLENGES:
@@ -78,7 +78,10 @@ GUIDELINES FOR CREATING PROFESSIONAL CODING CHALLENGES:
 9. CRITICAL: You MUST provide exactly ONE edge case that uses the MAXIMUM possible constraint values (at or very near 10^9 where applicable)
 10. CRITICAL: Create EXACTLY 4 private test cases that test different aspects of the solution
 
-IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 - 1) where the constraints allow. Do not use smaller values. If the actual maximum input would be impractically large to represent fully (e.g., an array with 10^9 elements), structure the test case to still push the solution to its limits while having a reasonable representation.`;
+IMPORTANT: 
+- For the single edge case, use actual maximum values of 10^9 (or 10^9 - 1) where the constraints allow. Do not use smaller values.
+- Your response MUST be a valid, parseable JSON object with no extra text before or after.
+- Do not include markdown code blocks or backticks in your response - just pure JSON.`;
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o", // Using a better model for higher quality challenges
@@ -93,21 +96,62 @@ IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 
         },
       ],
       temperature: 0.7,
-      max_tokens: 3000,
+      max_tokens: 4000, // Increased from 3000 to ensure complete responses
     });
 
     let aiResponse = response.choices[0].message.content;
     console.log("Raw AI Response:", aiResponse);
 
-    // Clean and parse JSON
+    // Enhanced JSON cleaning and parsing
     aiResponse = aiResponse.replace(/```json|```/g, "").trim();
+
+    // Additional cleaning to handle potential issues
+    // Remove any non-JSON text before opening brace
+    const firstBraceIndex = aiResponse.indexOf("{");
+    if (firstBraceIndex > 0) {
+      aiResponse = aiResponse.substring(firstBraceIndex);
+    }
+
+    // Remove any text after the closing brace
+    const lastBraceIndex = aiResponse.lastIndexOf("}");
+    if (lastBraceIndex !== -1 && lastBraceIndex < aiResponse.length - 1) {
+      aiResponse = aiResponse.substring(0, lastBraceIndex + 1);
+    }
+
     let challengeData;
     try {
       challengeData = JSON.parse(aiResponse);
     } catch (parseError) {
       console.error("Failed to parse AI response as JSON:", parseError);
-      return res.status(500).json({ message: "Invalid JSON response from AI" });
+
+      // Attempt to fix common JSON issues
+      try {
+        // Check if we have unterminated JSON (missing closing braces)
+        const openBraces = (aiResponse.match(/{/g) || []).length;
+        const closeBraces = (aiResponse.match(/}/g) || []).length;
+
+        if (openBraces > closeBraces) {
+          // Add missing closing braces
+          aiResponse = aiResponse + "}".repeat(openBraces - closeBraces);
+        }
+
+        // Replace any invalid control characters
+        aiResponse = aiResponse.replace(/[\x00-\x1F\x7F]/g, "");
+
+        // Try again with the fixed JSON
+        challengeData = JSON.parse(aiResponse);
+        console.log("Fixed and parsed JSON successfully");
+      } catch (secondError) {
+        // If still fails, return a more detailed error
+        console.error("JSON repair attempt failed:", secondError);
+        return res.status(500).json({
+          message: "Invalid JSON response from AI",
+          details:
+            "The AI generated malformed JSON that couldn't be parsed. Please try again or modify your prompt.",
+        });
+      }
     }
+
     console.log("Parsed Challenge Data:", challengeData);
 
     // Validate required fields
@@ -123,10 +167,19 @@ IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 
       "edgeCases",
       "explanation",
     ];
+
+    const missingFields = [];
     for (const field of requiredFields) {
       if (!challengeData[field]) {
-        throw new Error(`Missing required field: ${field}`);
+        missingFields.push(field);
       }
+    }
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        message: "Challenge data is incomplete",
+        missingFields: missingFields,
+      });
     }
 
     // Validate test case structures
@@ -134,21 +187,36 @@ IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 
       !Array.isArray(challengeData.publicTestCases) ||
       challengeData.publicTestCases.length < 2
     ) {
-      throw new Error("Challenge must have at least 2 public test cases");
+      return res.status(400).json({
+        message: "Challenge must have at least 2 public test cases",
+        currentCount: Array.isArray(challengeData.publicTestCases)
+          ? challengeData.publicTestCases.length
+          : 0,
+      });
     }
 
     if (
       !Array.isArray(challengeData.privateTestCases) ||
       challengeData.privateTestCases.length !== 4
     ) {
-      throw new Error("Challenge must have exactly 4 private test cases");
+      return res.status(400).json({
+        message: "Challenge must have exactly 4 private test cases",
+        currentCount: Array.isArray(challengeData.privateTestCases)
+          ? challengeData.privateTestCases.length
+          : 0,
+      });
     }
 
     if (
       !Array.isArray(challengeData.edgeCases) ||
       challengeData.edgeCases.length !== 1
     ) {
-      throw new Error("Challenge must have exactly 1 edge case");
+      return res.status(400).json({
+        message: "Challenge must have exactly 1 edge case",
+        currentCount: Array.isArray(challengeData.edgeCases)
+          ? challengeData.edgeCases.length
+          : 0,
+      });
     }
 
     // Validate the single edge case contains maximum values
@@ -158,7 +226,7 @@ IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 
         "Edge case may not contain maximum constraint values (10^9)"
       );
 
-      // Add a validation message
+      // Add a validation warning
       challengeData.validationWarning =
         "Edge case might not properly test maximum constraints (10^9)";
     }
@@ -174,15 +242,22 @@ IMPORTANT: For the single edge case, use actual maximum values of 10^9 (or 10^9 
       return testCase;
     };
 
-    challengeData.publicTestCases = challengeData.publicTestCases.map((tc) =>
-      validateTestCase(tc, "public")
-    );
-    challengeData.privateTestCases = challengeData.privateTestCases.map((tc) =>
-      validateTestCase(tc, "private")
-    );
-    challengeData.edgeCases = challengeData.edgeCases.map((tc) =>
-      validateTestCase(tc, "edge")
-    );
+    try {
+      challengeData.publicTestCases = challengeData.publicTestCases.map((tc) =>
+        validateTestCase(tc, "public")
+      );
+      challengeData.privateTestCases = challengeData.privateTestCases.map(
+        (tc) => validateTestCase(tc, "private")
+      );
+      challengeData.edgeCases = challengeData.edgeCases.map((tc) =>
+        validateTestCase(tc, "edge")
+      );
+    } catch (validationError) {
+      return res.status(400).json({
+        message: "Test case validation failed",
+        error: validationError.message,
+      });
+    }
 
     // Create and save the challenge
     const newChallenge = new CodingChallenge({
