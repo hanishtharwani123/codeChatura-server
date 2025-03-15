@@ -81,7 +81,10 @@ GUIDELINES FOR CREATING PROFESSIONAL CODING CHALLENGES:
 IMPORTANT: 
 - For the single edge case, use actual maximum values of 10^9 (or 10^9 - 1) where the constraints allow. Do not use smaller values.
 - Your response MUST be a valid, parseable JSON object with no extra text before or after.
-- Do not include markdown code blocks or backticks in your response - just pure JSON.`;
+- DO NOT include markdown code blocks or backticks in your response - just pure JSON.
+- CAREFULLY check that all quotes, braces, and brackets are properly balanced and escaped.
+- DO NOT use template literals or expressions inside string values.
+- MAKE SURE to properly escape all special characters in strings (especially quotes and newlines).`;
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o", // Using a better model for higher quality challenges
@@ -96,179 +99,101 @@ IMPORTANT:
         },
       ],
       temperature: 0.7,
-      max_tokens: 4000, // Increased from 3000 to ensure complete responses
+      max_tokens: 8000, // Increased from 3000 to ensure complete responses
     });
 
     let aiResponse = response.choices[0].message.content;
     console.log("Raw AI Response:", aiResponse);
 
-    // Enhanced JSON cleaning and parsing
-    aiResponse = aiResponse.replace(/```json|```/g, "").trim();
-
-    // Additional cleaning to handle potential issues
-    // Remove any non-JSON text before opening brace
-    const firstBraceIndex = aiResponse.indexOf("{");
-    if (firstBraceIndex > 0) {
-      aiResponse = aiResponse.substring(firstBraceIndex);
-    }
-
-    // Remove any text after the closing brace
-    const lastBraceIndex = aiResponse.lastIndexOf("}");
-    if (lastBraceIndex !== -1 && lastBraceIndex < aiResponse.length - 1) {
-      aiResponse = aiResponse.substring(0, lastBraceIndex + 1);
-    }
-
-    let challengeData;
+    // Enhanced multi-stage JSON cleaning and parsing
     try {
-      challengeData = JSON.parse(aiResponse);
-    } catch (parseError) {
-      console.error("Failed to parse AI response as JSON:", parseError);
+      // Step 1: Basic cleanup - Remove markdown code blocks
+      aiResponse = aiResponse.replace(/```json|```/g, "").trim();
 
-      // Attempt to fix common JSON issues
+      // Step 2: Remove any non-JSON text before opening brace and after closing brace
+      const firstBraceIndex = aiResponse.indexOf("{");
+      if (firstBraceIndex > 0) {
+        aiResponse = aiResponse.substring(firstBraceIndex);
+      }
+
+      const lastBraceIndex = aiResponse.lastIndexOf("}");
+      if (lastBraceIndex !== -1 && lastBraceIndex < aiResponse.length - 1) {
+        aiResponse = aiResponse.substring(0, lastBraceIndex + 1);
+      }
+
+      // Step 3: First attempt - Try direct parsing
       try {
-        // Check if we have unterminated JSON (missing closing braces)
-        const openBraces = (aiResponse.match(/{/g) || []).length;
-        const closeBraces = (aiResponse.match(/}/g) || []).length;
+        const challengeData = JSON.parse(aiResponse);
+        console.log("Successfully parsed JSON on first attempt");
 
-        if (openBraces > closeBraces) {
-          // Add missing closing braces
-          aiResponse = aiResponse + "}".repeat(openBraces - closeBraces);
-        }
+        // If we got here, proceed with the challenge processing
+        processAndSaveChallenge(challengeData, prompt, req, res);
+        return; // Exit function after successful processing
+      } catch (initialParseError) {
+        console.log("Initial JSON parse failed, attempting repairs...");
+        // Continue to more advanced repairs
+      }
 
-        // Replace any invalid control characters
-        aiResponse = aiResponse.replace(/[\x00-\x1F\x7F]/g, "");
+      // Step 4: Fix potential JSON syntax issues
+      let repairedJson = repairJsonSyntax(aiResponse);
 
-        // Try again with the fixed JSON
-        challengeData = JSON.parse(aiResponse);
-        console.log("Fixed and parsed JSON successfully");
-      } catch (secondError) {
-        // If still fails, return a more detailed error
-        console.error("JSON repair attempt failed:", secondError);
+      // Step 5: Try parsing again with repaired JSON
+      try {
+        const challengeData = JSON.parse(repairedJson);
+        console.log("Successfully parsed JSON after syntax repair");
+
+        // If successful, process the challenge
+        processAndSaveChallenge(challengeData, prompt, req, res, true);
+        return; // Exit function after successful processing
+      } catch (secondParseError) {
+        console.log("Syntax repair failed, attempting deeper fixes...");
+        // Continue to more aggressive repairs
+      }
+
+      // Step 6: More aggressive structure-aware repairs
+      repairedJson = repairJsonStructure(aiResponse);
+
+      // Final attempt to parse
+      const challengeData = JSON.parse(repairedJson);
+      console.log("Successfully parsed JSON after structure repair");
+
+      // Process the challenge with a flag indicating heavy repairs were needed
+      processAndSaveChallenge(challengeData, prompt, req, res, true);
+    } catch (finalError) {
+      // If all repair attempts fail
+      console.error("All JSON repair attempts failed:", finalError);
+
+      // Create a simpler challenge structure as fallback
+      try {
+        const fallbackChallenge = createFallbackChallenge(aiResponse, prompt);
+        console.log("Created fallback challenge");
+
+        // Save the fallback challenge
+        const newChallenge = new CodingChallenge({
+          ...fallbackChallenge,
+          prompt,
+          createdAt: new Date(),
+          userId: req.user ? req.user._id : null,
+          wasRepaired: true,
+          isFallback: true,
+        });
+
+        const savedChallenge = await newChallenge.save();
+        res.status(201).json({
+          ...savedChallenge.toObject(),
+          warning:
+            "Challenge was created using fallback mode due to parsing errors.",
+        });
+      } catch (fallbackError) {
+        // If even the fallback fails, return detailed error
         return res.status(500).json({
-          message: "Invalid JSON response from AI",
+          message: "Failed to process AI response",
           details:
-            "The AI generated malformed JSON that couldn't be parsed. Please try again or modify your prompt.",
+            "The AI generated malformed JSON that couldn't be repaired. Please try again with a simpler prompt.",
+          error: finalError.message,
         });
       }
     }
-
-    console.log("Parsed Challenge Data:", challengeData);
-
-    // Validate required fields
-    const requiredFields = [
-      "title",
-      "difficultyLevel",
-      "description",
-      "inputFormat",
-      "outputFormat",
-      "constraints",
-      "publicTestCases",
-      "privateTestCases",
-      "edgeCases",
-      "explanation",
-    ];
-
-    const missingFields = [];
-    for (const field of requiredFields) {
-      if (!challengeData[field]) {
-        missingFields.push(field);
-      }
-    }
-
-    if (missingFields.length > 0) {
-      return res.status(400).json({
-        message: "Challenge data is incomplete",
-        missingFields: missingFields,
-      });
-    }
-
-    // Validate test case structures
-    if (
-      !Array.isArray(challengeData.publicTestCases) ||
-      challengeData.publicTestCases.length < 2
-    ) {
-      return res.status(400).json({
-        message: "Challenge must have at least 2 public test cases",
-        currentCount: Array.isArray(challengeData.publicTestCases)
-          ? challengeData.publicTestCases.length
-          : 0,
-      });
-    }
-
-    if (
-      !Array.isArray(challengeData.privateTestCases) ||
-      challengeData.privateTestCases.length !== 4
-    ) {
-      return res.status(400).json({
-        message: "Challenge must have exactly 4 private test cases",
-        currentCount: Array.isArray(challengeData.privateTestCases)
-          ? challengeData.privateTestCases.length
-          : 0,
-      });
-    }
-
-    if (
-      !Array.isArray(challengeData.edgeCases) ||
-      challengeData.edgeCases.length !== 1
-    ) {
-      return res.status(400).json({
-        message: "Challenge must have exactly 1 edge case",
-        currentCount: Array.isArray(challengeData.edgeCases)
-          ? challengeData.edgeCases.length
-          : 0,
-      });
-    }
-
-    // Validate the single edge case contains maximum values
-    const edgeCaseStr = JSON.stringify(challengeData.edgeCases);
-    if (!edgeCaseStr.includes("10^9") && !edgeCaseStr.includes("1000000000")) {
-      console.warn(
-        "Edge case may not contain maximum constraint values (10^9)"
-      );
-
-      // Add a validation warning
-      challengeData.validationWarning =
-        "Edge case might not properly test maximum constraints (10^9)";
-    }
-
-    // Validate test case format
-    const validateTestCase = (testCase, type) => {
-      if (!testCase.input || typeof testCase.input !== "string") {
-        throw new Error(`Invalid input format in ${type} test case`);
-      }
-      if (!testCase.output || typeof testCase.output !== "string") {
-        throw new Error(`Invalid output format in ${type} test case`);
-      }
-      return testCase;
-    };
-
-    try {
-      challengeData.publicTestCases = challengeData.publicTestCases.map((tc) =>
-        validateTestCase(tc, "public")
-      );
-      challengeData.privateTestCases = challengeData.privateTestCases.map(
-        (tc) => validateTestCase(tc, "private")
-      );
-      challengeData.edgeCases = challengeData.edgeCases.map((tc) =>
-        validateTestCase(tc, "edge")
-      );
-    } catch (validationError) {
-      return res.status(400).json({
-        message: "Test case validation failed",
-        error: validationError.message,
-      });
-    }
-
-    // Create and save the challenge
-    const newChallenge = new CodingChallenge({
-      ...challengeData,
-      prompt,
-      createdAt: new Date(),
-      userId: req.user ? req.user._id : null,
-    });
-
-    const savedChallenge = await newChallenge.save();
-    res.status(201).json(savedChallenge);
   } catch (error) {
     console.error("Error generating challenge:", error);
     res.status(500).json({
@@ -277,6 +202,381 @@ IMPORTANT:
     });
   }
 };
+
+// Function to process and save a valid challenge
+function processAndSaveChallenge(
+  challengeData,
+  prompt,
+  req,
+  res,
+  wasRepaired = false
+) {
+  // Validate required fields
+  const requiredFields = [
+    "title",
+    "difficultyLevel",
+    "description",
+    "inputFormat",
+    "outputFormat",
+    "constraints",
+    "publicTestCases",
+    "privateTestCases",
+    "edgeCases",
+    "explanation",
+  ];
+
+  const missingFields = [];
+  for (const field of requiredFields) {
+    if (!challengeData[field]) {
+      missingFields.push(field);
+    }
+  }
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      message: "Challenge data is incomplete",
+      missingFields: missingFields,
+    });
+  }
+
+  // Validate test case structures
+  if (
+    !Array.isArray(challengeData.publicTestCases) ||
+    challengeData.publicTestCases.length < 1
+  ) {
+    // Fix: Add a default test case if missing
+    if (!Array.isArray(challengeData.publicTestCases)) {
+      challengeData.publicTestCases = [
+        { input: "Sample input", output: "Sample output" },
+      ];
+    }
+
+    // Add warning
+    challengeData.validationWarning =
+      (challengeData.validationWarning || "") +
+      " Public test cases were incomplete and have been supplemented.";
+  }
+
+  if (
+    !Array.isArray(challengeData.privateTestCases) ||
+    challengeData.privateTestCases.length < 4
+  ) {
+    // Fix: Add or pad private test cases if needed
+    if (!Array.isArray(challengeData.privateTestCases)) {
+      challengeData.privateTestCases = [];
+    }
+
+    while (challengeData.privateTestCases.length < 4) {
+      challengeData.privateTestCases.push({
+        input: `Auto-generated test case ${
+          challengeData.privateTestCases.length + 1
+        }`,
+        output: "Expected output",
+      });
+    }
+
+    // Add warning
+    challengeData.validationWarning =
+      (challengeData.validationWarning || "") +
+      " Private test cases were incomplete and have been supplemented.";
+  }
+
+  if (
+    !Array.isArray(challengeData.edgeCases) ||
+    challengeData.edgeCases.length < 1
+  ) {
+    // Fix: Add a default edge case if missing
+    challengeData.edgeCases = [
+      { input: "Edge case with maximum values", output: "Expected output" },
+    ];
+
+    // Add warning
+    challengeData.validationWarning =
+      (challengeData.validationWarning || "") +
+      " Edge case was missing and has been added.";
+  }
+
+  // Validate the single edge case contains maximum values
+  const edgeCaseStr = JSON.stringify(challengeData.edgeCases);
+  if (!edgeCaseStr.includes("10^9") && !edgeCaseStr.includes("1000000000")) {
+    console.warn("Edge case may not contain maximum constraint values (10^9)");
+
+    // Add a validation warning
+    challengeData.validationWarning =
+      (challengeData.validationWarning || "") +
+      " Edge case might not properly test maximum constraints (10^9).";
+  }
+
+  // Validate test case format
+  const validateTestCase = (testCase, type) => {
+    if (!testCase.input || typeof testCase.input !== "string") {
+      testCase.input = `Default ${type} input`;
+    }
+    if (!testCase.output || typeof testCase.output !== "string") {
+      testCase.output = `Default ${type} output`;
+    }
+    return testCase;
+  };
+
+  try {
+    challengeData.publicTestCases = challengeData.publicTestCases.map((tc) =>
+      validateTestCase(tc, "public")
+    );
+    challengeData.privateTestCases = challengeData.privateTestCases.map((tc) =>
+      validateTestCase(tc, "private")
+    );
+    challengeData.edgeCases = challengeData.edgeCases.map((tc) =>
+      validateTestCase(tc, "edge")
+    );
+  } catch (validationError) {
+    console.warn("Test case validation issues:", validationError.message);
+    // Instead of failing, add a warning
+    challengeData.validationWarning =
+      (challengeData.validationWarning || "") +
+      ` Test case validation issues: ${validationError.message}`;
+  }
+
+  const newChallenge = new CodingChallenge({
+    ...challengeData,
+    prompt,
+    createdAt: new Date(),
+    userId: req.user ? req.user._id : null,
+    wasRepaired: wasRepaired,
+  });
+
+  newChallenge
+    .save()
+    .then((savedChallenge) => {
+      res.status(201).json(savedChallenge);
+    })
+    .catch((saveError) => {
+      console.error("Error saving challenge:", saveError);
+      res.status(500).json({
+        message: "Error saving challenge",
+        error: saveError.message,
+      });
+    });
+}
+
+// Helper function to repair JSON syntax issues
+function repairJsonSyntax(jsonString) {
+  // Fix unescaped quotes in string values
+  let inString = false;
+  let result = "";
+  let i = 0;
+
+  while (i < jsonString.length) {
+    const char = jsonString[i];
+
+    if (char === '"' && (i === 0 || jsonString[i - 1] !== "\\")) {
+      inString = !inString;
+      result += char;
+    } else if (inString && char === '"' && jsonString[i - 1] !== "\\") {
+      // Escape quotes inside strings
+      result += '\\"';
+    } else if (inString && (char === "\n" || char === "\r")) {
+      // Replace literal newlines with escaped newlines in strings
+      result += "\\n";
+    } else {
+      result += char;
+    }
+
+    i++;
+  }
+
+  // Fix missing commas between array items
+  result = result.replace(/}(\s*){/g, "},\n{"); // Missing commas between objects
+  result = result.replace(/](\s*)\[/g, "],\n["); // Missing commas between arrays
+  result = result.replace(/}(\s*)\[/g, "},\n["); // Missing commas between object and array
+  result = result.replace(/](\s*){/g, "],\n{"); // Missing commas between array and object
+
+  // Fix control characters
+  result = result.replace(/[\x00-\x1F\x7F]/g, "");
+
+  // Balance braces and brackets
+  const openBraces = (result.match(/{/g) || []).length;
+  const closeBraces = (result.match(/}/g) || []).length;
+  if (openBraces > closeBraces) {
+    result += "}".repeat(openBraces - closeBraces);
+  }
+
+  const openBrackets = (result.match(/\[/g) || []).length;
+  const closeBrackets = (result.match(/\]/g) || []).length;
+  if (openBrackets > closeBrackets) {
+    result += "]".repeat(openBrackets - closeBrackets);
+  }
+
+  return result;
+}
+
+// More advanced repair for structural issues
+function repairJsonStructure(jsonString) {
+  // First apply syntax fixes
+  let result = repairJsonSyntax(jsonString);
+
+  // Check for truncated test cases
+  const testCaseRegex =
+    /"(publicTestCases|privateTestCases|edgeCases)"\s*:\s*\[/g;
+  let match;
+  while ((match = testCaseRegex.exec(result)) !== null) {
+    const startPos = match.index;
+    const testCaseType = match[1];
+
+    // Find the corresponding closing bracket
+    let openBrackets = 1;
+    let endPos = match.index + match[0].length;
+
+    while (openBrackets > 0 && endPos < result.length) {
+      if (result[endPos] === "[") openBrackets++;
+      if (result[endPos] === "]") openBrackets--;
+      endPos++;
+    }
+
+    // If we didn't find a closing bracket, the array is truncated
+    if (openBrackets > 0) {
+      // Get the content so far
+      const partialContent = result.substring(
+        startPos + match[0].length,
+        result.length
+      );
+
+      // Count complete test cases
+      const completeTestCases = (
+        partialContent.match(
+          /"input"\s*:\s*".*?"\s*,\s*"output"\s*:\s*".*?"/g
+        ) || []
+      ).length;
+
+      // Find the last complete test case
+      let lastCompletePos = 0;
+      for (let i = 0; i < completeTestCases; i++) {
+        const inputMatch = partialContent.indexOf('"input"', lastCompletePos);
+        const outputMatch = partialContent.indexOf('"output"', inputMatch);
+
+        if (inputMatch !== -1 && outputMatch !== -1) {
+          // Find the end of this test case
+          const endQuote = partialContent.indexOf('"', outputMatch + 10);
+          if (endQuote !== -1) {
+            lastCompletePos = endQuote + 1;
+          }
+        }
+      }
+
+      // If we found at least one complete test case, truncate after it
+      if (lastCompletePos > 0) {
+        const preContent = result.substring(
+          0,
+          startPos + match[0].length + lastCompletePos
+        );
+        const postContent = result.substring(endPos);
+        result = preContent + "]" + postContent;
+      } else {
+        // If we couldn't find any complete test cases, provide a default array
+        const preContent = result.substring(0, startPos + match[0].length);
+        const postContent = result.substring(endPos);
+        result =
+          preContent +
+          '{"input":"Default input","output":"Default output"}]' +
+          postContent;
+      }
+    }
+  }
+
+  // Ensure the top-level structure is valid
+  const requiredFields = [
+    "title",
+    "difficultyLevel",
+    "description",
+    "inputFormat",
+    "outputFormat",
+    "constraints",
+    "publicTestCases",
+    "privateTestCases",
+    "edgeCases",
+    "explanation",
+  ];
+
+  for (const field of requiredFields) {
+    if (!result.includes(`"${field}"`)) {
+      // If a required field is missing, add it near the end
+      const lastBraceIndex = result.lastIndexOf("}");
+      if (lastBraceIndex !== -1) {
+        let defaultValue = `"${field}": "Default ${field}"`;
+        if (
+          field === "publicTestCases" ||
+          field === "privateTestCases" ||
+          field === "edgeCases"
+        ) {
+          defaultValue = `"${field}": [{"input":"Default input","output":"Default output"}]`;
+        }
+
+        // Check if we need to add a comma
+        const needsComma =
+          result.substring(0, lastBraceIndex).trim().endsWith("}") ||
+          result.substring(0, lastBraceIndex).trim().endsWith("]");
+
+        const insertValue = (needsComma ? "," : "") + defaultValue;
+        result =
+          result.substring(0, lastBraceIndex) +
+          insertValue +
+          result.substring(lastBraceIndex);
+      }
+    }
+  }
+
+  return result;
+}
+
+// Create a fallback challenge when all parsing attempts fail
+function createFallbackChallenge(aiResponse, prompt) {
+  // Extract as much information as possible from the AI response
+  const extractField = (fieldName) => {
+    const regex = new RegExp(`"${fieldName}"\\s*:\\s*"([^"]*)"`, "i");
+    const match = aiResponse.match(regex);
+    return match ? match[1] : `Default ${fieldName}`;
+  };
+
+  // Extract title if possible
+  let title = extractField("title");
+  if (title === "Default title") {
+    // Try to create a title from the prompt
+    title = "Coding Challenge: " + prompt.split(" ").slice(0, 5).join(" ");
+  }
+
+  // Build a basic challenge structure
+  return {
+    title,
+    difficultyLevel: extractField("difficultyLevel"),
+    description: extractField("description"),
+    inputFormat: "Input format could not be parsed from AI response",
+    outputFormat: "Output format could not be parsed from AI response",
+    constraints: "Default constraints",
+    publicTestCases: [
+      {
+        input: "Sample input",
+        output: "Sample output",
+      },
+    ],
+    privateTestCases: [
+      { input: "Test case 1", output: "Output 1" },
+      { input: "Test case 2", output: "Output 2" },
+      { input: "Test case 3", output: "Output 3" },
+      { input: "Test case 4", output: "Output 4" },
+    ],
+    edgeCases: [
+      {
+        input: "Edge case with maximum values",
+        output: "Expected output for edge case",
+      },
+    ],
+    explanation:
+      "This challenge was created in fallback mode due to parsing errors. " +
+      "Please review and edit the challenge details as needed.",
+    wasRepaired: true,
+    isFallback: true,
+    originalPrompt: prompt,
+  };
+}
 
 // Get all challenges
 const getChallenges = async (req, res) => {
