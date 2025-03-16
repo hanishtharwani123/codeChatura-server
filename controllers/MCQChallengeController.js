@@ -5,85 +5,6 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Preprocess markdown to ensure proper formatting
-const preprocessMarkdown = (markdown) => {
-  if (!markdown) return "";
-
-  // Improve table formatting
-  // First, ensure there's proper spacing in table cells and align columns
-  let processed = markdown.replace(/\|\s*([^|]*)\s*\|/g, "| $1 |");
-
-  // Make sure tables have proper markdown format with header separators
-  processed = processed.replace(
-    /(\|\s*[\w\s]+\s*\|)(\s*\n\s*\|)/g,
-    (match, header, nextLine) => {
-      // Count the number of columns in the header row
-      const columnCount = header.match(/\|/g).length - 1;
-
-      // If the next line doesn't have separator dashes, insert them
-      if (!nextLine.includes("-")) {
-        let separatorRow = "|";
-        for (let i = 0; i < columnCount; i++) {
-          separatorRow += "---------|";
-        }
-        return header + "\n" + separatorRow + nextLine;
-      }
-      return match;
-    }
-  );
-
-  // Format SQL tables in code blocks to ensure they render properly
-  processed = processed.replace(
-    /```sql\s*([\s\S]*?)(CREATE TABLE|SELECT|INSERT|UPDATE|DELETE)[\s\S]*?```/gi,
-    (match, prefix, sqlStatement) => {
-      // Check if there's a table in regular markdown format within the SQL code block
-      if (match.includes("|")) {
-        // Make sure the table markdown is properly formatted with spacing
-        return match.replace(/\|\s*([^|]*)\s*\|/g, "| $1 |");
-      }
-      return match;
-    }
-  );
-
-  // Ensure SQL tables outside code blocks are properly formatted
-  processed = processed.replace(
-    /(\|\s*[\w\s]+\s*\|\s*\n)(?!\|[-|]*\|)/g,
-    (match, tableLine) => {
-      // Count columns in the table line
-      const columns = tableLine.match(/\|/g).length - 1;
-
-      // Create a separator row
-      let separator = "|";
-      for (let i = 0; i < columns; i++) {
-        separator += "---------|";
-      }
-
-      return tableLine + separator + "\n";
-    }
-  );
-
-  // Ensure code blocks are correctly formatted
-  processed = processed.replace(/```(\s*)\n/g, "```\n"); // Normalize accidental extra spaces in code blocks
-
-  // Fix cases where text continues inside a code block
-  processed = processed.replace(
-    /(```[\w+][\s\S]+?)(```)([^\n])/g,
-    "$1$2\n\n$3"
-  );
-
-  // Ensure SQL keywords are uppercase inside SQL code blocks
-  processed = processed.replace(/```sql([\s\S]*?)```/gi, (match, p1) => {
-    const uppercased = p1.replace(
-      /\b(select|from|where|join|inner|outer|left|right|on|and|or|group by|order by|having|limit|insert|update|delete|create|alter|drop|table|view|index|into|values|set)\b/gi,
-      (keyword) => keyword.toUpperCase()
-    );
-    return "```sql\n" + uppercased.trim() + "\n```";
-  });
-
-  return processed;
-};
-
-// Generate MCQ
 const generateMCQ = async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -92,52 +13,41 @@ const generateMCQ = async (req, res) => {
     }
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4", // Using a more powerful model for higher quality
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
-          content: `You are an expert computer science instructor. Your task is to create high-quality multiple-choice questions based on the user's prompt. Follow these guidelines strictly:
+          content: `You are an expert instructor creating high-quality multiple-choice questions for professional software engineers and developers. 
 
-1. Create an MCQ with exactly 4 options (A, B, C, D) with only one correct answer.
-2. Make sure the MCQ is educational and professionally written.
-3. Use markdown formatting for any code snippets with proper language tags (e.g., \`\`\`sql, \`\`\`python)
-4. For SQL tables and database questions:
-   - Format as markdown tables with proper column alignment
-   - Include column headers with proper capitalization
-   - Use consistent spacing in table cells
-   - Show complete CREATE TABLE statements when relevant
-   - Format SQL keywords in UPPERCASE for readability
-   - IMPORTANT: Ensure all tables have the markdown header separator row with dashes like:
-     | Column1 | Column2 |
-     |---------|---------|
-     | value1  | value2  |
-5. Include a detailed explanation for the correct answer that teaches the underlying concepts.
+CONTENT REQUIREMENTS:
+- Create professional, educational MCQs with exactly 4 options (A, B, C, D)
+- Ensure only one option is correct
+- Target appropriate complexity for professional developers
+- Include challenging distractors that test common misconceptions
+- Focus on practical, real-world scenarios relevant to professional engineers
 
-When showing SQL tables, use this EXACT format with the separator row:
-\`\`\`
-| Column1 | Column2 | Column3 |
-|---------|---------|---------|
-| value1  | value2  | value3  |
-| value4  | value5  | value6  |
-\`\`\`
+FORMATTING GUIDELINES:
+- ALL content must be properly formatted for correct display
+- ALL code snippets must be inside proper markdown code blocks with appropriate language tags
+- ALL tables must be properly formatted with consistent alignment and header separators
+- Ensure proper spacing before and after all special elements (code blocks, tables, etc.)
+- Use consistent indentation and formatting throughout
 
-For SQL-specific questions:
-- Always include the table structure/schema
-- Use realistic but simple data values
-- In explanations, break down the query step by step
-- Explain concepts like JOIN types, WHERE conditions, aggregations clearly
+FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:
 
-Format your response as follows:
-TITLE: [Title of the MCQ]
+TITLE: [Concise, descriptive title]
 DIFFICULTY: [Easy/Medium/Hard]
-QUESTION: [Question text with any code snippets or tables]
+QUESTION: [Clear, unambiguous question text]
+
+[Any supporting content with proper formatting]
+
 OPTIONS:
 A: [Option A text]
 B: [Option B text]
 C: [Option C text]
 D: [Option D text]
-CORRECT: [Correct option letter]
-EXPLANATION: [Detailed explanation]`,
+CORRECT: [Correct option letter only - A, B, C, or D]
+EXPLANATION: [Detailed explanation with reasoning for correct answer and why others are wrong]`,
         },
         {
           role: "user",
@@ -149,22 +59,22 @@ EXPLANATION: [Detailed explanation]`,
     });
 
     let aiResponse = response.choices[0].message.content;
-    console.log("Raw AI Response:", aiResponse);
 
-    // Parse the response into a structured format
-    const titleMatch = aiResponse.match(/TITLE:\s*(.*)/i);
-    const difficultyMatch = aiResponse.match(/DIFFICULTY:\s*(.*)/i);
+    // Enhanced parsing with more robust regex patterns
+    const titleMatch = aiResponse.match(/TITLE:\s*(.*?)(?=\n|$)/is);
+    const difficultyMatch = aiResponse.match(/DIFFICULTY:\s*(.*?)(?=\n|$)/is);
     const questionMatch = aiResponse.match(
-      /QUESTION:\s*([\s\S]*?)(?=OPTIONS:|$)/i
+      /QUESTION:\s*([\s\S]*?)(?=OPTIONS:|$)/is
     );
     const optionsMatch = aiResponse.match(
-      /OPTIONS:\s*([\s\S]*?)(?=CORRECT:|$)/i
+      /OPTIONS:\s*([\s\S]*?)(?=CORRECT:|$)/is
     );
-    const correctMatch = aiResponse.match(/CORRECT:\s*(.*)/i);
+    const correctMatch = aiResponse.match(/CORRECT:\s*([A-D])/is);
     const explanationMatch = aiResponse.match(
-      /EXPLANATION:\s*([\s\S]*?)(?=$)/i
+      /EXPLANATION:\s*([\s\S]*?)(?=$)/is
     );
 
+    // Validate all required parts are present
     if (
       !titleMatch ||
       !difficultyMatch ||
@@ -173,44 +83,44 @@ EXPLANATION: [Detailed explanation]`,
       !correctMatch ||
       !explanationMatch
     ) {
-      return res
-        .status(500)
-        .json({ message: "Invalid response format from AI" });
-    }
-
-    // Extract the options
-    const optionsText = optionsMatch[1].trim();
-    const optionsArray = [];
-
-    // Match each option with its content
-    const optionRegex = /([A-D]):\s*([\s\S]*?)(?=(?:[A-D]:|$))/g;
-    let optionMatch;
-    while ((optionMatch = optionRegex.exec(optionsText)) !== null) {
-      optionsArray.push({
-        id: optionMatch[1],
-        text: preprocessMarkdown(optionMatch[2].trim()),
+      console.error("Parsing error with AI response:", aiResponse);
+      return res.status(500).json({
+        message: "Invalid response format from AI",
+        details: "Response missing required sections",
       });
     }
 
-    // Ensure we have exactly 4 options
-    if (optionsArray.length !== 4) {
-      return res
-        .status(500)
-        .json({ message: "Invalid number of options in AI response" });
+    // Extract and clean options
+    const optionsText = optionsMatch[1].trim();
+    const optionsArray = [];
+    const optionRegex = /([A-D]):\s*([\s\S]*?)(?=(?:[A-D]:|CORRECT:|$))/g;
+
+    let optionMatch;
+    while ((optionMatch = optionRegex.exec(optionsText + "\n"))) {
+      optionsArray.push({
+        id: optionMatch[1],
+        text: optionMatch[2].trim(),
+      });
     }
 
-    // Create the MCQ object with preprocessed markdown
+    // Validate we have exactly 4 options
+    if (optionsArray.length !== 4) {
+      console.error("Invalid options count:", optionsArray.length);
+      return res.status(500).json({
+        message: `Invalid number of options in AI response: found ${optionsArray.length} instead of 4`,
+      });
+    }
+
+    // Create the MCQ object
     const mcqData = {
       title: titleMatch[1].trim(),
       difficultyLevel: difficultyMatch[1].trim(),
-      question: preprocessMarkdown(questionMatch[1].trim()),
+      question: questionMatch[1].trim(),
       options: optionsArray,
       correctOptionId: correctMatch[1].trim(),
-      explanation: preprocessMarkdown(explanationMatch[1].trim()),
+      explanation: explanationMatch[1].trim(),
       prompt,
     };
-
-    console.log("Parsed MCQ Data:", mcqData);
 
     // Create and save the MCQ
     const newMCQ = new MCQ({
